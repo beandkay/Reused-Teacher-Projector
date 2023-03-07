@@ -2,3 +2,16 @@
 /*.pyc
 /.DS.Store
 /tags
+*/logs
+*/ckpt
+*/.ipynb_checkpoints
+*/.idea
+*/.vscode
+*/.pytest_cache
+*/.cache
+*/.git
+*/.gitignore
+*/.gitattribute
+*/checkpoints
+*/__pycache__
+*/.DS_Store
