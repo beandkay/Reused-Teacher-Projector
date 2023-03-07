@@ -409,7 +409,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='./ckpt/checkpoint_{}_{}_{:04d}.pth.tar'.format(args.arch, args.teacher_arch, epoch), pre_filename='./ckpt/checkpoint_{}_{}_{:04d}.pth.tar'.format(args.arch, arch.teacher_arch, epoch-1), args=args)
+            }, is_best=False, filename='./ckpt/checkpoint_{}_{}_{:04d}.pth.tar'.format(args.arch, args.teacher_arch, epoch), pre_filename='./ckpt/checkpoint_{}_{}_{:04d}.pth.tar'.format(args.arch, args.teacher_arch, epoch-1), args=args)
 
 
 def train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args, scaler):
