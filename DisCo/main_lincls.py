@@ -168,8 +168,10 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.arch == "mobilenetv3":
         model = mobilenetv3_large_100(num_classes=1000)
     elif args.arch == "resnet18":
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
         model = resnet18(num_classes=1000)
     elif args.arch == "resnet34":
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
         model = resnet34(num_classes=1000)
     else:
         model = models.__dict__[args.arch]()
