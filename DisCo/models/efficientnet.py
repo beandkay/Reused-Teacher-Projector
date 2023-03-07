@@ -363,6 +363,7 @@ class EfficientNet(nn.Module):
         self.act2 = act_layer(inplace=True)
         self.global_pool, self.classifier = create_classifier(
             self.num_features, self.num_classes, pool_type=global_pool)
+        self.transfer = nn.Identity()
 
         efficientnet_init_weights(self)
 
@@ -389,6 +390,10 @@ class EfficientNet(nn.Module):
         x = self.conv_head(x)
         x = self.bn2(x)
         x = self.act2(x)
+        if not isinstance(self.transfer, nn.Identity):
+            if x.shape[2] > 2048:
+                x = F.adaptive_avg_pool2d(x, (2048, 2048))
+            x = self.transfer(x)
         return x
 
     def forward(self, x):

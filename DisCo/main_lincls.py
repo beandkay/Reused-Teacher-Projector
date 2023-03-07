@@ -25,15 +25,24 @@ import glob
 from models.efficientnet import efficientnet_b0
 from models.efficientnet import efficientnet_b1
 from models.mobilenetv3 import mobilenetv3_large_100
+from models.resnet import resnet18, resnet34
 from models.swav_resnet50 import resnet50w2
 from models.swav_resnet50 import resnet50 as swav_resnet50
 
+def conv1x1(in_channels, out_channels, stride=1):
+    return nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=stride, bias=False)
+def conv3x3(in_channels, out_channels, stride=1, groups=1):
+    return nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=stride, bias=False, groups=groups)
+        
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 model_names.append("efficientb0")
 model_names.append("efficientb1")
 model_names.append("mobilenetv3")
+model_names.append("resnet18")
+model_names.append("resnet34")
+model_names.append("resnet50w2")
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR',
@@ -158,9 +167,53 @@ def main_worker(gpu, ngpus_per_node, args):
         model = efficientnet_b1(pretrained=False, num_classes=1000)
     elif args.arch == "mobilenetv3":
         model = mobilenetv3_large_100(num_classes=1000)
+    elif args.arch == "resnet18":
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        model = resnet18(num_classes=1000)
+    elif args.arch == "resnet34":
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        model = resnet34(num_classes=1000)
     else:
         model = models.__dict__[args.arch]()
     print (model)
+    
+    # init the fc layer
+    if args.arch in ["efficientb0", "efficientb1", "mobilenetv3"]:
+        model.transfer = nn.Sequential(
+                conv1x1(model.classifier.in_features, 1024),
+                nn.BatchNorm2d(1024),
+                nn.ReLU(inplace=True),
+                conv3x3(1024, 1024),
+                # depthwise convolution
+                #conv3x3(t_n//factor, t_n//factor, groups=t_n//factor),
+                nn.BatchNorm2d(1024),
+                nn.ReLU(inplace=True),
+                conv1x1(1024, 2048),
+                nn.BatchNorm2d(2048),
+                nn.ReLU(inplace=True),
+        )
+
+        model.classifier = nn.Linear(2048, 1000)
+        model.classifier.weight.data.normal_(mean=0.0, std=0.01)
+        model.classifier.bias.data.zero_()
+    else:
+        model.transfer = nn.Sequential(
+                conv1x1(model.fc.in_features, 1024),
+                nn.BatchNorm2d(1024),
+                nn.ReLU(inplace=True),
+                conv3x3(1024, 1024),
+                # depthwise convolution
+                #conv3x3(t_n//factor, t_n//factor, groups=t_n//factor),
+                nn.BatchNorm2d(1024),
+                nn.ReLU(inplace=True),
+                conv1x1(1024, 2048),
+                nn.BatchNorm2d(2048),
+                nn.ReLU(inplace=True),
+        )   
+
+        model.fc = nn.Linear(2048, 1000)
+        model.fc.weight.data.normal_(mean=0.0, std=0.01)
+        model.fc.bias.data.zero_()
 
     # freeze all layers but the last fc
     for name, param in model.named_parameters():
@@ -168,14 +221,7 @@ def main_worker(gpu, ngpus_per_node, args):
             param.requires_grad = False
         if args.arch in ['efficientb0', 'efficientb1', "mobilenetv3"] and (name not in ['classifier.weight','classifier.bias']):
             param.requires_grad = False
-    # init the fc layer
-    if args.arch in ["efficientb0", "efficientb1", "mobilenetv3"]:
-        model.classifier.weight.data.normal_(mean=0.0, std=0.01)
-        model.classifier.bias.data.zero_()
-    else:
-        model.fc.weight.data.normal_(mean=0.0, std=0.01)
-        model.fc.bias.data.zero_()
-
+            
     # load from pre-trained, before DistributedDataParallel constructor
     if args.pretrained:
         if os.path.isfile(args.pretrained):
@@ -336,7 +382,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
-            }, is_best)
+            }, is_best, args=args)
             if epoch == args.start_epoch:
                 sanity_check(model.state_dict(), args.pretrained, args)
 
@@ -437,10 +483,10 @@ def validate(val_loader, model, criterion, args):
     return top1.avg
 
 
-def save_checkpoint(state, is_best, filename='ckpt/checkpoint.pth.tar'):
+def save_checkpoint(state, is_best, filename='ckpt/checkpoint.pth.tar', args=None):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'ckpt/model_best.pth.tar')
+        shutil.copyfile(filename, 'ckpt/model_best_linear_{}.pth.tar'.format(args.arch))
 
 
 def sanity_check(state_dict, pretrained_weights, args):
@@ -533,7 +579,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 

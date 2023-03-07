@@ -32,7 +32,7 @@ import moco.builder_kq_mse_largeembedding_2048
 from models.efficientnet import efficientnet_b0
 from models.efficientnet import efficientnet_b1
 from models.mobilenetv3 import mobilenetv3_large_100
-from models.resnet import resnet18
+from models.resnet import resnet18, resnet34
 from models.swav_resnet50 import resnet50w2
 from models.swav_resnet50 import resnet50 as swav_resnet50
 
@@ -45,6 +45,7 @@ model_names.append("efficientb0")
 model_names.append("efficientb1")
 model_names.append("mobilenetv3")
 model_names.append("resnet18")
+model_names.append("resnet34")
 model_names.append("resnet50w2")
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
@@ -211,7 +212,11 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.arch == "mobilenetv3":
         model = mobilenetv3_large_100
     elif args.arch == "resnet18":
-        model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        model = resnet18
+    elif args.arch == "resnet34":
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        model = resnet34
     else:
         model = models.__dict__[args.arch]
 
@@ -408,7 +413,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='./ckpt/checkpoint_{:04d}.pth.tar'.format(epoch), pre_filename='./ckpt/checkpoint_{:04d}.pth.tar'.format(epoch-1))
+            }, is_best=False, filename='./ckpt/checkpoint_{}_{}_rkd_{:04d}.pth.tar'.format(args.arch, args.teacher_arch, epoch), pre_filename='./ckpt/checkpoint_{}_{}_rkd_{:04d}.pth.tar'.format(args.arch, arch.teacher_arch, epoch-1), args=args)
 
 
 def train(train_loader, model, criterion, criterion_mse, criterion_dist, criterion_angle, optimizer, epoch, args):
@@ -504,12 +509,12 @@ def train(train_loader, model, criterion, criterion_mse, criterion_dist, criteri
             progress.display(i)
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', pre_filename=None):
+def save_checkpoint(state, is_best, filename='checkpoint_rkd.pth.tar', pre_filename=None, args=None):
     torch.save(state, filename)
     if os.path.exists(pre_filename):
         os.remove(pre_filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, f'model_best_{args.arch}_{args.teacher_arch}_rkd.pth.tar')
 
 
 class AverageMeter(object):
@@ -581,8 +586,8 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
-def get_last_checkpoint(checkpoint_dir):
-    all_ckpt = glob.glob(os.path.join(checkpoint_dir, 'checkpoint_0*.pth.tar'))
+def get_last_checkpoint(checkpoint_dir, args=None):
+    all_ckpt = glob.glob(os.path.join(checkpoint_dir, f'checkpoint_{args.arch}_{args.teacher_arch}_rkd_0*.pth.tar'))
     if all_ckpt:
         all_ckpt = sorted(all_ckpt)
         return all_ckpt[-1]

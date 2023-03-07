@@ -1,14 +1,19 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-
+def conv1x1(in_channels, out_channels, stride=1):
+    return nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=stride, bias=False)
+def conv3x3(in_channels, out_channels, stride=1, groups=1):
+    return nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=stride, bias=False, groups=groups)
+        
 class MoCo(nn.Module):
     """
     Build a MoCo model with: a query encoder, a key encoder, and a queue
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, teacher_encoder, dim=128, K=65536, m=0.999, T=0.07, mlp=False, args=None):
+    def __init__(self, base_encoder, teacher_encoder, dim=128, K=65536, m=0.999, T=0.07, mlp=False, args=None, factor=2):
         """
         dim: feature dimension (default: 128)
         K: queue size; number of negative keys (default: 65536)
@@ -30,7 +35,7 @@ class MoCo(nn.Module):
         # num_classes is the output fc dimension
         if args.teacher_arch in ['resnet50', 'resnet101', 'resnet152']:
             self.teacher_encoder_q = teacher_encoder(num_classes=dim)
-            self.teacher_encoder_k = teacher_encoder(num_classes=dim)
+            # self.teacher_encoder_k = teacher_encoder(num_classes=dim)
         elif args.teacher_arch == 'resnet50w2':
             self.teacher_encoder_q = teacher_encoder(
                 normalize=True,
@@ -38,12 +43,12 @@ class MoCo(nn.Module):
                 output_dim=dim,
                 nmb_prototypes=args.nmb_prototypes
             )
-            self.teacher_encoder_k = teacher_encoder(
-                normalize=True,
-                hidden_mlp=8192,
-                output_dim=dim,
-                nmb_prototypes=args.nmb_prototypes
-            )
+            # self.teacher_encoder_k = teacher_encoder(
+            #     normalize=True,
+            #     hidden_mlp=8192,
+            #     output_dim=dim,
+            #     nmb_prototypes=args.nmb_prototypes
+            # )
         elif args.teacher_arch in ['SWAVresnet50', 'DCresnet50', 'SELAresnet50']:
             self.teacher_encoder_q = teacher_encoder(
                 normalize=True,
@@ -51,37 +56,44 @@ class MoCo(nn.Module):
                 output_dim=dim,
                 nmb_prototypes=args.nmb_prototypes
             )
-            self.teacher_encoder_k = teacher_encoder(
-                normalize=True,
-                hidden_mlp=2048,
-                output_dim=dim,
-                nmb_prototypes=args.nmb_prototypes
-            )
+            # self.teacher_encoder_k = teacher_encoder(
+            #     normalize=True,
+            #     hidden_mlp=2048,
+            #     output_dim=dim,
+            #     nmb_prototypes=args.nmb_prototypes
+            # )
 
         # teacher mlp
         if mlp:
             if args.teacher_arch in ['resnet50', 'resnet101', 'resnet152']:
                 dim_mlp = self.teacher_encoder_q.fc.weight.shape[1]
                 self.teacher_encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.teacher_encoder_q.fc)
-                self.teacher_encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.teacher_encoder_k.fc)
-
+                # self.teacher_encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.teacher_encoder_k.fc)
+        self.t_n = dim_mlp
+        
         # student mlp
         if mlp:
             if args.arch.startswith('efficient') or args.arch == 'mobilenetv3':
                 dim_mlp = self.encoder_q.classifier.weight.shape[1]
-                self.encoder_q.classifier = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
-                self.encoder_k.classifier = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
+                # self.encoder_q.classifier = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
+                # self.encoder_k.classifier = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
+                self.encoder_q.classifier = self.encoder_k.classifier = self.teacher_encoder_q.fc
             else:
                 dim_mlp = self.encoder_q.fc.weight.shape[1]
                 #tmpq = self.encoder_q.classifier
                 #tmpk = self.encoder_k.classifier
-                self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
-                self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
+                # self.encoder_q.fc = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
+                # self.encoder_k.fc = nn.Sequential(nn.Linear(dim_mlp, 2048), nn.ReLU(), nn.Linear(2048, 128))
+                self.encoder_q.fc = self.encoder_k.fc = self.teacher_encoder_q.fc
+        self.s_n = dim_mlp
 
         # teacher gard
-        for param_q, param_k in zip(self.teacher_encoder_q.parameters(), self.teacher_encoder_k.parameters()):
-            param_k.data.copy_(param_q.data)  # initialize
-            param_k.requires_grad = False  # not update by gradient
+        # for param_q, param_k in zip(self.teacher_encoder_q.parameters(), self.teacher_encoder_k.parameters()):
+        #     param_k.data.copy_(param_q.data)  # initialize
+        #     param_k.requires_grad = False  # not update by gradient
+        #     param_q.requires_grad = False
+        
+        for param_q in self.teacher_encoder_q.parameters():
             param_q.requires_grad = False
 
         # student grad
@@ -89,13 +101,34 @@ class MoCo(nn.Module):
             param_k.data.copy_(param_q.data) # initialize
             param_k.requires_grad = False  # not update by gradient
             param_q.requires_grad = True
-
+            
+        for (name_param_q, param_q), (name_param_k, param_k) in zip(self.encoder_q.named_parameters(), self.encoder_k.named_parameters()):
+            if 'fc' in name_param_q or 'classifier' in name_param_q:
+                param_q.requires_grad = False
+            if 'fc' in name_param_k or 'classifier' in name_param_k:
+                param_k.requires_grad = False
+        
         # create the queue
         self.register_buffer("queue", torch.randn(dim, K))
-        self.queue = nn.functional.normalize(self.queue, dim=0)
+        self.queue = F.normalize(self.queue, dim=0)
 
-        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))   
 
+        # A bottleneck design to reduce extra parameters
+        self.encoder_q.transfer = self.encoder_k.transfer = nn.Sequential(
+            conv1x1(self.s_n, self.t_n//factor),
+            nn.BatchNorm2d(self.t_n//factor),
+            nn.ReLU(inplace=True),
+            conv3x3(self.t_n//factor, self.t_n//factor),
+            # depthwise convolution
+            #conv3x3(t_n//factor, t_n//factor, groups=t_n//factor),
+            nn.BatchNorm2d(self.t_n//factor),
+            nn.ReLU(inplace=True),
+            conv1x1(self.t_n//factor, self.t_n),
+            nn.BatchNorm2d(self.t_n),
+            nn.ReLU(inplace=True),
+            )
+        
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
         """
@@ -179,33 +212,50 @@ class MoCo(nn.Module):
         #print ("key images shape:", im_k.shape)
 
         # compute query features
-        q = self.encoder_q(im_q)  # queries: NxC
-        q = nn.functional.normalize(q, dim=1)
+        feat_q = self.encoder_q.forward_features(im_q)
+        # q = self.encoder_q.fc(feat_q)  # queries: NxC
+        # q = F.normalize(q, dim=1)
 
-        qk = self.encoder_q(im_k)
-        qk = nn.functional.normalize(qk, dim=1)
+        feat_qk = self.encoder_q.forward_features(im_q)
+        # qk = self.encoder_q.fc(feat_qk)
+        # qk = F.normalize(qk, dim=1)
 
         # compute key features
         with torch.no_grad():  # no gradient to keys
             self._momentum_update_key_encoder()  # update the key encoder
 
             teacher_qk = self.teacher_encoder_q(im_k)
-            teacher_qk = nn.functional.normalize(teacher_qk, dim=1)
+            teacher_qk = F.normalize(teacher_qk, dim=1)
 
             # shuffle for making use of BN
             im_k, idx_unshuffle = self._batch_shuffle_ddp(im_k)
-
-            k = self.encoder_k(im_k)  # keys: NxC
-            k = nn.functional.normalize(k, dim=1)
-            k = self._batch_unshuffle_ddp(k, idx_unshuffle)
+            
+            feat_k = self.encoder_k.forward_features(im_k)  # keys: NxC
 
             #teacher_k = self.teacher_encoder_k(im_k)
-            #teacher_k = nn.functional.normalize(teacher_k, dim=1)
+            #teacher_k = F.normalize(teacher_k, dim=1)
             #teacher_k = self._batch_unshuffle_ddp(teacher_k, idx_unshuffle)
 
             teacher_q = self.teacher_encoder_q(im_q)  # queries: NxC
-            teacher_q = nn.functional.normalize(teacher_q, dim=1)
-
+            teacher_q = F.normalize(teacher_q, dim=1)
+            
+        # Prediction via Teacher Classifier
+        temp_feat_q = self.teacher_encoder_q.avgpool(feat_q)
+        temp_feat_q = temp_feat_q.view(temp_feat_q.size(0), -1)
+        q = self.encoder_q.get_classifier()(temp_feat_q)
+        q = F.normalize(q, dim=1)
+        
+        temp_feat_qk = self.teacher_encoder_q.avgpool(feat_qk)
+        temp_feat_qk = temp_feat_q.view(temp_feat_qk.size(0), -1)
+        qk = self.encoder_k.get_classifier()(temp_feat_qk)
+        qk = F.normalize(qk, dim=1)
+        
+        with torch.no_grad():
+            temp_feat_k = self.teacher_encoder_q.avgpool(feat_k)
+            temp_feat_k = temp_feat_k.view(temp_feat_k.size(0), -1)
+            k = self.encoder_k.get_classifier()(temp_feat_k)
+            k = F.normalize(k, dim=1)
+            k = self._batch_unshuffle_ddp(k, idx_unshuffle)
 
         # compute logits
         # Einstein sum is more intuitive

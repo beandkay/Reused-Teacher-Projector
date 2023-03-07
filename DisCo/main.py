@@ -22,6 +22,7 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
 import glob
+from torch.cuda.amp import autocast, GradScaler
 
 import moco.loader
 import moco.builder_kq_mse_largeembedding_2048
@@ -32,7 +33,7 @@ import moco.builder_kq_mse_largeembedding_2048
 from models.efficientnet import efficientnet_b0
 from models.efficientnet import efficientnet_b1
 from models.mobilenetv3 import mobilenetv3_large_100
-from models.resnet import resnet18
+from models.resnet import resnet18, resnet34
 from models.swav_resnet50 import resnet50w2
 from models.swav_resnet50 import resnet50 as swav_resnet50
 
@@ -43,6 +44,7 @@ model_names.append("efficientb0")
 model_names.append("efficientb1")
 model_names.append("mobilenetv3")
 model_names.append("resnet18")
+model_names.append("resnet34")
 model_names.append("resnet50w2")
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
@@ -154,7 +156,7 @@ def main():
         args.world_size = ngpus_per_node * args.world_size
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
-        print(ngpus_per_node)
+        print(f'Number of GPUs: {ngpus_per_node}')
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
     else:
         # Simply call main_worker function
@@ -209,7 +211,11 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.arch == "mobilenetv3":
         model = mobilenetv3_large_100
     elif args.arch == "resnet18":
-        model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        model = resnet18
+    elif args.arch == "resnet34":
+        # model = models.__dict__[args.arch]#resnet18(pretrained=False)
+        model = resnet34
     else:
         model = models.__dict__[args.arch]
 
@@ -231,32 +237,32 @@ def main_worker(gpu, ngpus_per_node, args):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
+        # apply SyncBN
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         if args.gpu is not None:
             torch.cuda.set_device(args.gpu)
             model.cuda(args.gpu)
-            #print (args.gpu)
             # When using a single GPU per process and per
             # DistributedDataParallel, we need to divide the batch size
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / ngpus_per_node)
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-            #model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
-            #model = torch.nn.parallel.DistributedDataParallel(model)
-            model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
+            model = torch.nn.parallel.DistributedDataParallel(model)
     elif args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
-        # comment out the following line for debugging
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
     else:
-        # AllGather implementation (batch shuffle, queue update, etc.) in
-        # this code only supports DistributedDataParallel.
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
+        # DataParallel will divide and allocate batch_size to all available GPUs
+        if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
+            model.features = torch.nn.DataParallel(model.features)
+            model.cuda()
+        else:
+            model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
@@ -292,7 +298,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Resume from ./ckpt
     if args.resume_ckpt:
-        checkpoint_path = get_last_checkpoint('./ckpt')
+        checkpoint_path = get_last_checkpoint('./ckpt', args)
         if os.path.isfile(checkpoint_path):
             print("=> loading checkpoint '{}'".format(checkpoint_path))
             if args.gpu is None:
@@ -386,13 +392,15 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
+    scaler = GradScaler()
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args)
+        train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args, scaler)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -401,10 +409,10 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='./ckpt/checkpoint_{:04d}.pth.tar'.format(epoch), pre_filename='./ckpt/checkpoint_{:04d}.pth.tar'.format(epoch-1))
+            }, is_best=False, filename='./ckpt/checkpoint_{}_{}_{:04d}.pth.tar'.format(args.arch, args.teacher_arch, epoch), pre_filename='./ckpt/checkpoint_{}_{}_{:04d}.pth.tar'.format(args.arch, arch.teacher_arch, epoch-1), args=args)
 
 
-def train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args):
+def train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args, scaler):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -431,15 +439,16 @@ def train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
 
         # compute output
-        output, target, student_q, teacher_q, student_qk, teacher_qk = model(im_q=images[0], im_k=images[1])
-        loss = criterion(output, target)
-        mse_loss = criterion_mse(teacher_q, student_q)
-        mse_loss_qk = criterion_mse(teacher_qk, student_qk)
+        with autocast(enabled=True):
+            output, target, student_q, teacher_q, student_qk, teacher_qk = model(im_q=images[0], im_k=images[1])
+            loss = criterion(output, target)
+            mse_loss = criterion_mse(teacher_q, student_q)
+            mse_loss_qk = criterion_mse(teacher_qk, student_qk)
 
-        if args.only_mse:
-            loss = 0.0 * loss + 1.0 * mse_loss + 1.0 * mse_loss_qk
-        else:
-            loss = 1.0 * loss + 1.0 * mse_loss + 1.0 * mse_loss_qk
+            if args.only_mse:
+                loss = 0.0 * loss + 1.0 * mse_loss + 1.0 * mse_loss_qk
+            else:
+                loss = 1.0 * loss + 1.0 * mse_loss + 1.0 * mse_loss_qk
 
         #loss += mse_loss
         #loss += mse_loss_qk
@@ -459,8 +468,17 @@ def train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        
+        if args.arch == 'mobilenetv3':
+            # Unscales the gradients of optimizer's assigned params in-place
+            scaler.unscale_(optimizer)
+
+            # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.)
+        
+        scaler.step(optimizer)
+        scaler.update()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -470,12 +488,12 @@ def train(train_loader, model, criterion, criterion_mse, optimizer, epoch, args)
             progress.display(i)
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', pre_filename=None):
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', pre_filename=None, args=None):
     torch.save(state, filename)
     if os.path.exists(pre_filename):
         os.remove(pre_filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, f'model_best_{args.arch}_{args.teacher_arch}.pth.tar')
 
 
 class AverageMeter(object):
@@ -543,12 +561,12 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
-def get_last_checkpoint(checkpoint_dir):
-    all_ckpt = glob.glob(os.path.join(checkpoint_dir, 'checkpoint_0*.pth.tar'))
+def get_last_checkpoint(checkpoint_dir, args=None):
+    all_ckpt = glob.glob(os.path.join(checkpoint_dir, f'checkpoint_{args.arch}_{args.teacher_arch}_0*.pth.tar'))
     if all_ckpt:
         all_ckpt = sorted(all_ckpt)
         return all_ckpt[-1]

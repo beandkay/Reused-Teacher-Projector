@@ -106,6 +106,7 @@ class MobileNetV3(nn.Module):
         self.conv_head = create_conv2d(num_pooled_chs, self.num_features, 1, padding=pad_type, bias=head_bias)
         self.act2 = act_layer(inplace=True)
         self.classifier = Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.transfer = nn.Identity()
 
         efficientnet_init_weights(self)
 
@@ -133,6 +134,10 @@ class MobileNetV3(nn.Module):
         x = self.global_pool(x)
         x = self.conv_head(x)
         x = self.act2(x)
+        if not isinstance(self.transfer, nn.Identity):
+            if x.shape[2] > 2048:
+                x = F.adaptive_avg_pool2d(x, (2048, 2048))
+            x = self.transfer(x)
         return x
 
     def forward(self, x):
