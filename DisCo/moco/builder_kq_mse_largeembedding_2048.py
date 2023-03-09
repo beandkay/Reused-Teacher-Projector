@@ -132,7 +132,9 @@ class MoCo(nn.Module):
             nn.BatchNorm2d(self.t_n),
             nn.ReLU(inplace=True),
             ) if args.arch in ['resnet50', 'resnet101', 'resnet152'] \
-        else InvertedResidual(self.s_n, self.t_n, act_layer=HardMishMe, norm_layer=nn.BatchNorm2d, exp_ratio=(self.t_n//self.s_n))
+        else InvertedResidual(self.s_n, self.t_n, act_layer=HardMishMe, norm_layer=nn.BatchNorm2d, exp_ratio=factor)\
+            if args.arch == 'mobilenetv3' else \
+                InvertedResidual(self.s_n, self.t_n, act_layer=nn.SiLU, norm_layer=nn.BatchNorm2d, exp_ratio=factor)
         
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
