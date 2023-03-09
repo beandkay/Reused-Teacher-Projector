@@ -2,6 +2,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import sys
+sys.path.append('../')
+from DisCo.models.layers.activations_me import HardMishMe
+from DisCo.models.efficientnet_blocks import InvertedResidual
 
 def conv1x1(in_channels, out_channels, stride=1):
     return nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=stride, bias=False)
@@ -127,7 +131,8 @@ class MoCo(nn.Module):
             conv1x1(self.t_n//factor, self.t_n),
             nn.BatchNorm2d(self.t_n),
             nn.ReLU(inplace=True),
-            )
+            ) if args.arch in ['resnet50', 'resnet101', 'resnet152'] \
+        else InvertedResidual(self.s_n, self.t_n, 2, act_layer=HardMishMe, norm_layer=nn.BatchNorm2d, exp_ratio=(self.t_n//self.s_n))
         
     @torch.no_grad()
     def _momentum_update_key_encoder(self):

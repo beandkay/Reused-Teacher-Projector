@@ -175,7 +175,6 @@ def main_worker(gpu, ngpus_per_node, args):
         model = resnet34(num_classes=1000)
     else:
         model = models.__dict__[args.arch]()
-    print (model)
     
     # init the fc layer
     if args.arch in ["efficientb0", "efficientb1", "mobilenetv3"]:
@@ -215,6 +214,8 @@ def main_worker(gpu, ngpus_per_node, args):
         model.fc.weight.data.normal_(mean=0.0, std=0.01)
         model.fc.bias.data.zero_()
 
+    print (model)
+    
     # freeze all layers but the last fc
     for name, param in model.named_parameters():
         if args.arch in ["resnet18", "resnet34", "resnet50"] and (name not in ['fc.weight', 'fc.bias']):
