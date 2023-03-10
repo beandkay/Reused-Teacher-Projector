@@ -28,6 +28,8 @@ from models.mobilenetv3 import mobilenetv3_large_100
 from models.resnet import resnet18, resnet34
 from models.swav_resnet50 import resnet50w2
 from models.swav_resnet50 import resnet50 as swav_resnet50
+from models.efficientnet_blocks import InvertedResidual
+from models.layers.activations import HardSwishMe
 
 def conv1x1(in_channels, out_channels, stride=1):
     return nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=stride, bias=False)
@@ -178,19 +180,8 @@ def main_worker(gpu, ngpus_per_node, args):
     
     # init the fc layer
     if args.arch in ["efficientb0", "efficientb1", "mobilenetv3"]:
-        model.transfer = nn.Sequential(
-                conv1x1(model.classifier.in_features, 1024),
-                nn.BatchNorm2d(1024),
-                nn.ReLU(inplace=True),
-                conv3x3(1024, 1024),
-                # depthwise convolution
-                #conv3x3(t_n//factor, t_n//factor, groups=t_n//factor),
-                nn.BatchNorm2d(1024),
-                nn.ReLU(inplace=True),
-                conv1x1(1024, 2048),
-                nn.BatchNorm2d(2048),
-                nn.ReLU(inplace=True),
-        )
+        model.transfer = InvertedResidual(model.classifier.in_features, 2048, act_layer=nn.SiLU, norm_layer=nn.BatchNorm2d, exp_ratio=2)\
+            if args.arch in ["efficientb0", "efficientb1"] else InvertedResidual(model.classifier.in_features, 2048, act_layer=HardSwishMe, norm_layer=nn.BatchNorm2d, exp_ratio=2)
 
         model.classifier = nn.Linear(2048, 1000)
         model.classifier.weight.data.normal_(mean=0.0, std=0.01)
